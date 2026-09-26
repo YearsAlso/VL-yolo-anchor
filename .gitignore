@@ -1,0 +1,19 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+src/vl_yolo_anchor.egg-info/
+
+# Generated task artifacts (regenerable demo data)
+tasks/
+
+# Logs
+logs/
+
+# Node / GUI
+node_modules/
+dist/
+src-tauri/target/

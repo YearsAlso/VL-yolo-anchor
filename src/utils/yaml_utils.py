@@ -1,0 +1,44 @@
+"""YAML load/save helpers."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    """Load a YAML file into a dict.
+
+    Args:
+        path: Path to the YAML file.
+
+    Returns:
+        Parsed mapping. Returns an empty dict for empty files.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        ValueError: If the YAML root is not a mapping.
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"YAML file not found: {path}")
+    with path.open("r", encoding="utf-8") as fh:
+        data: Any = yaml.safe_load(fh)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a mapping at {path}, got {type(data).__name__}.")
+    return data
+
+
+def save_yaml(data: dict[str, Any], path: Path) -> None:
+    """Save a dict to a YAML file, creating parent directories as needed.
+
+    Args:
+        data: Mapping to serialize.
+        path: Destination path.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(data, fh, allow_unicode=True, sort_keys=False)

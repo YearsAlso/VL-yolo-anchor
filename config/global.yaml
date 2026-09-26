@@ -1,0 +1,29 @@
+# Global platform configuration
+model:
+  # Local VL model for annotation (Qwen2.5-VL recommended)
+  vl_model_name: "Qwen/Qwen2.5-VL-7B-Instruct"
+  load_in_4bit: true
+  device: "auto"          # auto | cuda | cpu
+  max_new_tokens: 2048
+  # GPU VRAM limit in MB (for 3060Ti ~8000MB total)
+  max_gpu_memory_mb: 7000
+
+inference:
+  batch_size: 1
+  conf_threshold: 0.25
+  min_defect_pixels: 16   # minimum defect area in pixels
+  enable_cpu_fallback: true
+
+paths:
+  tasks_root: "tasks"
+  prompts_dir: "prompts"
+  config_dir: "config"
+
+server:
+  host: "127.0.0.1"
+  port: 8765
+  reload: false
+
+logging:
+  level: "INFO"
+  dir: "logs"

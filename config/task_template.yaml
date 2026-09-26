@@ -1,0 +1,54 @@
+# Task configuration template — copied when a new task is created
+task:
+  name: "unnamed_task"
+  description: ""
+  industry: ""            # e.g. photovoltaic, semiconductor, PCB
+  modality: ""            # e.g. EL, PL, visible, infrared, X-ray
+
+training_plan:
+  # Defect classes — key = class id (0-based), value = name
+  classes: {}
+  # Annotation rules
+  min_defect_pixels: 16
+  conf_threshold: 0.25
+  exclude_items: []       # e.g. ["normal_grid_lines", "native_grain_boundaries"]
+  obb_rule: "clockwise_normalized"
+
+  # Dataset split
+  split:
+    train_ratio: 0.7
+    val_ratio: 0.2
+    test_ratio: 0.1
+    stratified: true
+
+  # Model recommendation
+  model:
+    yolo_version: "yolo11n-obb"
+    imgsz: 1024
+
+  # Training hyperparameters
+  hyperparameters:
+    epochs: 100
+    batch: 8
+    optimizer: "AdamW"
+    lr0: 0.001
+    weight_decay: 0.0005
+    imgsz: 1024
+    device: "0"
+
+  # Quality inspection rules
+  inspection:
+    iou_duplicate_threshold: 0.7
+    size_outlier_ratio: 0.1
+    check_missing_labels: true
+    check_duplicate_boxes: true
+    check_class_errors: true
+    check_coords_out_of_range: true
+    check_modality_rule_conflict: true
+
+  # Evaluation metrics
+  metrics:
+    - "mAP50"
+    - "mAP50-95"
+    - "precision"
+    - "recall"
