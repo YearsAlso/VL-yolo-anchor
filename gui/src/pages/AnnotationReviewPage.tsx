@@ -3,15 +3,8 @@
 import { Alert, Button, Card, Empty, List, message, Select, Space, Spin } from "antd";
 import { useEffect, useState } from "react";
 import OBBCanvas from "../components/OBBCanvas";
-import { imageUrl, listImages, listTasks, runAnnotate } from "../services/api";
+import { getLabelBoxes, imageUrl, listImages, listTasks, runAnnotate } from "../services/api";
 import type { ImageItem, OBBBox } from "../types";
-
-/** Dummy review boxes until label-serving endpoints are wired to per-image files. */
-const DEMO_BOX: OBBBox = {
-  cls: 0,
-  points: [0.35, 0.4, 0.65, 0.4, 0.65, 0.6, 0.35, 0.6],
-  conf: 0.92,
-};
 
 /** Annotation Review tab: auto-annotate then inspect boxes visually. */
 export default function AnnotationReviewPage() {
@@ -19,6 +12,7 @@ export default function AnnotationReviewPage() {
   const [selected, setSelected] = useState<string | undefined>();
   const [images, setImages] = useState<ImageItem[]>([]);
   const [current, setCurrent] = useState<ImageItem | undefined>();
+  const [boxes, setBoxes] = useState<OBBBox[]>([]);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -35,6 +29,16 @@ export default function AnnotationReviewPage() {
     });
   }, [selected]);
 
+  useEffect(() => {
+    if (!selected || !current) {
+      setBoxes([]);
+      return;
+    }
+    void getLabelBoxes(selected, current.name)
+      .then(setBoxes)
+      .catch(() => setBoxes([])); // 404 = no label yet -> empty canvas
+  }, [selected, current]);
+
   const handleAnnotate = async () => {
     if (!selected) {
       message.warning("Please select a task first.");
@@ -44,6 +48,13 @@ export default function AnnotationReviewPage() {
     try {
       await runAnnotate(selected);
       message.success("Annotation finished. Labels written to ai_labels/.");
+      if (current) {
+        try {
+          setBoxes(await getLabelBoxes(selected, current.name));
+        } catch {
+          setBoxes([]);
+        }
+      }
     } catch (err) {
       message.error(`Annotate failed: ${(err as Error).message}`);
     } finally {
@@ -79,7 +90,7 @@ export default function AnnotationReviewPage() {
         <Space align="start" size="large">
           <div>
             {current ? (
-              <OBBCanvas imageUrl={imageUrl(current.url)} boxes={[DEMO_BOX]} />
+              <OBBCanvas imageUrl={imageUrl(current.url)} boxes={boxes} />
             ) : (
               <Empty description="No images in task" />
             )}

@@ -67,6 +67,75 @@ class InspectionReportResponse(BaseModel):
     report: dict[str, Any]
 
 
+class OBBBoxModel(BaseModel):
+    """A single oriented bounding box read from a label file."""
+
+    cls: int
+    points: list[float]
+    conf: float = 1.0
+
+
+class LabelBoxesResponse(BaseModel):
+    """Per-image label payload served to the annotation review canvas."""
+
+    image: str
+    boxes: list[OBBBoxModel]
+
+
+class LabeledImagesResponse(BaseModel):
+    """Names of images that have a label file (candidate or AI)."""
+
+    images: list[str]
+
+
+def _parse_label_file(path: Path) -> list[OBBBoxModel]:
+    """Parse a YOLO-OBB label file into structured boxes.
+
+    Lines have the format ``cls x1 y1 x2 y2 x3 y3 x4 y4`` with normalized
+    coordinates. Malformed lines are skipped with a warning.
+
+    Args:
+        path: Label file path.
+
+    Returns:
+        Parsed boxes; empty list for an empty file.
+    """
+    boxes: list[OBBBoxModel] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            cls = int(parts[0])
+            points = [float(v) for v in parts[1:]]
+        except ValueError:
+            logger.warning("Skipping malformed label line in %s: %r", path.name, line)
+            continue
+        if len(points) != 8:
+            logger.warning("Skipping label line with %d coords in %s: %r", len(points), path.name, line)
+            continue
+        boxes.append(OBBBoxModel(cls=cls, points=points, conf=1.0))
+    return boxes
+
+
+def _find_label_file(task_dir: Path, image_name: str) -> Path | None:
+    """Locate the best label file for an image (candidate labels first).
+
+    Args:
+        task_dir: Task directory.
+        image_name: Image file name; its stem selects the label.
+
+    Returns:
+        Label path, or None when no label exists.
+    """
+    stem = Path(image_name).stem
+    for sub in ("candidate_labels", "ai_labels"):
+        candidate = task_dir / sub / f"{stem}.txt"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 @app.get("/api/tasks")
 def list_tasks() -> list[str]:
     """List all task names.
@@ -217,6 +286,56 @@ def get_export_summary(name: str) -> dict[str, Any]:
     if not summary_path.is_file():
         raise HTTPException(status_code=404, detail=f"No dataset export for task: {name}")
     return load_yaml(summary_path)
+
+
+@app.get("/api/tasks/{name}/labels", response_model=LabeledImagesResponse)
+def list_labeled_images(name: str) -> LabeledImagesResponse:
+    """List images in a task that have a label file.
+
+    Args:
+        name: Task name.
+
+    Returns:
+        Sorted image names with at least one label file.
+
+    Raises:
+        HTTPException: 404 if the task is missing.
+    """
+    if name not in _task_manager.list_tasks():
+        raise HTTPException(status_code=404, detail=f"Task not found: {name}")
+    task_dir = _task_manager.task_dir(name)
+    labeled = [
+        p.name
+        for p in list_images(task_dir / "images")
+        if _find_label_file(task_dir, p.name) is not None
+    ]
+    return LabeledImagesResponse(images=labeled)
+
+
+@app.get("/api/tasks/{name}/labels/{image_name}", response_model=LabelBoxesResponse)
+def get_label_boxes(name: str, image_name: str) -> LabelBoxesResponse:
+    """Return the OBB boxes for one image (candidate labels take priority).
+
+    Args:
+        name: Task name.
+        image_name: Image file name.
+
+    Returns:
+        Parsed boxes for the image.
+
+    Raises:
+        HTTPException: 404 if the task, image, or any label file is missing.
+    """
+    if name not in _task_manager.list_tasks():
+        raise HTTPException(status_code=404, detail=f"Task not found: {name}")
+    task_dir = _task_manager.task_dir(name)
+    image_path = task_dir / "images" / image_name
+    if not image_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Image not found: {image_name}")
+    label_path = _find_label_file(task_dir, image_name)
+    if label_path is None:
+        raise HTTPException(status_code=404, detail=f"No label file for image: {image_name}")
+    return LabelBoxesResponse(image=image_name, boxes=_parse_label_file(label_path))
 
 
 @app.get("/api/tasks/{name}/images", response_model=list[ImageItem])

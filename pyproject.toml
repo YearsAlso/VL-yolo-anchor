@@ -29,6 +29,7 @@ dev = [
     "ruff>=0.6.0",
     "mypy>=1.11.0",
     "pytest>=8.3.0",
+    "httpx>=0.27.0",
 ]
 
 [build-system]
@@ -61,4 +62,4 @@ exclude = ["gui/", "tasks/"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["."]

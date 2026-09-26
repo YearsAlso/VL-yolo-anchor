@@ -86,6 +86,8 @@ uv run uvicorn src.api_server:app --host 127.0.0.1 --port 8765
 | GET | `/api/tasks/{name}/plan` | 当前训练计划 |
 | GET | `/api/tasks/{name}/report` | 最新质检报告 |
 | GET | `/api/tasks/{name}/export` | 数据集导出摘要 |
+| GET | `/api/tasks/{name}/labels` | 有标签文件的图片名列表 |
+| GET | `/api/tasks/{name}/labels/{img}` | 单图 OBB 标签（candidate_labels 优先） |
 | GET | `/api/tasks/{name}/images` `/images/{img}` | 图片列表 / 图片文件 |
 
 交互式文档：<http://127.0.0.1:8765/docs>
@@ -119,5 +121,7 @@ uv run pytest                   # 测试（tests/）
 - **PlanAgent / AnnotateAgent 使用确定性 stub 推理**（`StubLLMClient` /
   固定伪检测框），用于离线跑通全流程；接入真实 Qwen2.5-VL 时实现
   `LLMClient` 协议 / 替换 `AnnotateAgent._infer` 即可，提示词与解析逻辑已就绪。
-- GUI 的标注审核页暂以演示框渲染；逐图标签读取端点待接入。
-- `gui/` 依赖未随仓库提交，需先 `npm install`。
+- `gui/` 与 `gui/src-tauri/` 依赖未随仓库提交，需先 `npm install`
+  （`npm run tauri dev` 另需 Rust toolchain）。
+- SDD 流程文档见 `docs/sdd-workflow.md`；正式 spec 位于 `specs/`，
+  变更历史位于 `changes/`。

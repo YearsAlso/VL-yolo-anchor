@@ -1,7 +1,7 @@
 /** Axios-based API client for the FastAPI backend (127.0.0.1:8765). */
 
 import axios from "axios";
-import type { ExportSummary, ImageItem, InspectionReport, TaskPlan } from "../types";
+import type { ExportSummary, ImageItem, InspectionReport, OBBBox, TaskPlan } from "../types";
 
 const api = axios.create({
   baseURL: "http://127.0.0.1:8765",
@@ -62,4 +62,18 @@ export function imageUrl(url: string): string {
 export async function getExportSummary(task: string): Promise<ExportSummary> {
   const res = await api.get(`/api/tasks/${encodeURIComponent(task)}/export`);
   return res.data as ExportSummary;
+}
+
+/** List images in a task that have a label file (candidate or AI). */
+export async function listLabeledImages(task: string): Promise<string[]> {
+  const res = await api.get<{ images: string[] }>(`/api/tasks/${encodeURIComponent(task)}/labels`);
+  return res.data.images;
+}
+
+/** Fetch the OBB boxes for one image (candidate labels take priority). */
+export async function getLabelBoxes(task: string, imageName: string): Promise<OBBBox[]> {
+  const res = await api.get<{ image: string; boxes: OBBBox[] }>(
+    `/api/tasks/${encodeURIComponent(task)}/labels/${encodeURIComponent(imageName)}`,
+  );
+  return res.data.boxes;
 }
