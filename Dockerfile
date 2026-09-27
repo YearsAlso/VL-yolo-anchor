@@ -10,9 +10,12 @@ WORKDIR /app
 RUN pip install --no-cache-dir uv
 # Lockfile + metadata first for layer caching.
 COPY pyproject.toml uv.lock README.md ./
-# Export the locked runtime dependencies (no dev, no optional extras) and
-# install them into an isolated prefix we can copy into the runtime image.
-RUN uv export --frozen --no-dev --no-annotate -o requirements.txt \
+# Export the locked runtime dependencies (no dev, no optional extras, and not the
+# project itself) and install them into an isolated prefix we can copy into the
+# runtime image. The project is excluded because the runtime stage copies src/
+# directly; leaving it in emits an editable `-e .` entry, which pip refuses to
+# install from a requirements file that also carries hashes.
+RUN uv export --frozen --no-dev --no-annotate --no-emit-project -o requirements.txt \
     && pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # --- Runtime stage ---
