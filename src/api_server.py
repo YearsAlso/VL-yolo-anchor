@@ -215,9 +215,11 @@ def _safe_child(base_dir: Path, filename: str) -> Path:
 
     Rejects any value that is not a bare file name (separators ``/`` or ``\\``,
     ``..``, absolute paths) and, as a belt-and-braces check, verifies the
-    resolved target still lives under ``base_dir``. On Windows the Starlette
-    path regex ``[^/]+`` still admits backslashes, so the ``Path(name).name``
-    comparison is what actually blocks ``..\\..\\secret``.
+    resolved target still lives under ``base_dir``. Separators are rejected
+    explicitly rather than left to the ``Path(name).name`` comparison: on POSIX
+    a backslash is an ordinary file-name character, so that comparison alone
+    would let ``..\\..\\secret`` through, while the Starlette path regex
+    ``[^/]+`` admits backslashes on every platform.
 
     Args:
         base_dir: Directory the file must resolve within.
@@ -229,7 +231,7 @@ def _safe_child(base_dir: Path, filename: str) -> Path:
     Raises:
         HTTPException: 400 if the name attempts to escape ``base_dir``.
     """
-    if Path(filename).name != filename or filename in {"", ".", ".."}:
+    if filename in {"", ".", ".."} or "/" in filename or "\\" in filename or Path(filename).name != filename:
         raise HTTPException(status_code=400, detail=f"Invalid file name: {filename}")
     base = base_dir.resolve()
     target = (base / filename).resolve()
