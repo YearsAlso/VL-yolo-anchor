@@ -6,6 +6,28 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed (breaking)
+- **SDD structure migrated** to `specs/<feature>/spec.md` + `design.md` (one directory per
+capability). The previous flat `specs/*.spec.md` layout and the `changes/` staging
+  directory are **removed**; the retired proposal flow (five stage commands) is no longer used.
+  The two existing proposals were folded in: the deployment proposal into
+  `specs/deployment/design.md`, the audit-fixes proposal into `specs/audit-fixes/spec.md`
+  (marked archived). `docs/sdd-workflow.md` rewritten as the five-stage process view.
+- **Guidance assets added**: `.claude/{agents,skills,rules,workflows}` (9 / 19 / 8 / 8) with
+  `.qoder/{agents,skills}` as a one-way mirror; `CLAUDE.md` rewritten as the agent entry
+  point (its previous content — a one-off scaffold prompt — moved to
+  `docs/archive/build-task-scaffold.md`); new `AGENTS.md` for non-Claude agents.
+- **New hard-constraint rules**: `obb-hard-constraints.md` (promotes the scaffold's
+  never-violate list) and `frontend-backend-contract.md` (contract changes must land in one
+  commit across `api_server.py` + `types/index.ts` + `services/api.ts`).
+- **Gates added**: `scripts/sync_agent_assets.py` and `scripts/check_assets.py` (7 checks,
+  including a legacy-stack terminology gate and an SDD structure gate), `.githooks/pre-commit`,
+  Makefile targets `assets-sync` / `assets-check` / `hooks-install`, and an asset-consistency
+  step in CI. `make lint` / `make type` now also cover `scripts/`.
+- **`.gitattributes` added** (not in the original plan, but required): `core.autocrlf=true`
+  with no attribute file made the pre-commit shebang resolve as `bash\r`, so the hook could
+  not run on any platform. Hooks and shell scripts are pinned to `eol=lf`.
+
 ### Added
 - Docker self-hosting: root `Dockerfile` (CPU-only backend), `gui/Dockerfile`
   (Vite build + nginx `/api` reverse proxy), `docker-compose.yml`, `.env.example`,
