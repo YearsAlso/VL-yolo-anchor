@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: config_prompts
+title: 全局配置与 Agent 提示词模板
+scope:
+    - config/
+    - prompts/
+source_files: []
+depends_on: []
+related_to: []
