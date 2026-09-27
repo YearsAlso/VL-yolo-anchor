@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.agents.model_client import OpenAICompatClient, RecordingClient
 from src.agents.plan_agent import StubLLMClient
 from src.config import ModelSettings, load_settings
 from src.core.pipeline import Pipeline
@@ -88,5 +89,11 @@ def test_pipeline_wires_llm_and_vl_separately(tmp_path: Path) -> None:
     annotate = pipeline.agents["annotate"]
     plan = pipeline.agents["plan"]
     # Annotate got a real remote VL client (non-None); plan fell back to the stub.
-    assert annotate.vl_client is not None  # type: ignore[attr-defined]
-    assert isinstance(plan.llm_client, StubLLMClient)  # type: ignore[attr-defined]
+    # Both arrive wrapped in a RecordingClient, which is what fills the audit log.
+    vl_client = annotate.vl_client  # type: ignore[attr-defined]
+    llm_client = plan.llm_client  # type: ignore[attr-defined]
+    assert isinstance(vl_client, RecordingClient)
+    assert isinstance(llm_client, RecordingClient)
+    assert isinstance(llm_client.inner, StubLLMClient)
+    assert isinstance(vl_client.inner, OpenAICompatClient)
+    assert vl_client.inner.settings.model == "qwen2.5vl"

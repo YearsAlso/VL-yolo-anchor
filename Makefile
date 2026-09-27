@@ -1,5 +1,5 @@
 # Convenience targets for local dev and Docker self-hosting.
-.PHONY: help lint type test gui-install gui-typecheck gui-build \
+.PHONY: help lint type test doctor gui-install gui-typecheck gui-build \
         docker-build up down logs ps clean
 
 help: ## Show this help
@@ -13,6 +13,9 @@ type: ## mypy (strict) over the backend package
 
 test: ## Run the pytest suite
 	uv run pytest -q
+
+doctor: ## Self-check the configuration (exit 1 when a check fails)
+	uv run python run.py doctor
 
 gui-install: ## Install GUI node modules
 	cd gui && npm install

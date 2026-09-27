@@ -5,28 +5,48 @@ from __future__ import annotations
 import logging
 import random
 import shutil
+import threading
+import time
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.agents.annotate_agent import AnnotateAgent
 from src.agents.base_agent import BaseAgent
 from src.agents.inspect_agent import InspectAgent
-from src.agents.model_client import build_model_client
+from src.agents.model_client import ModelCallRecord, RecordingClient, VLClient, build_model_client
 from src.agents.plan_agent import PlanAgent, StubLLMClient
-from src.config import ModelSettings
+from src.config import ModelSettings, Role
+from src.core.metadata_store import RunEntry
 from src.core.task_manager import TaskManager
+from src.utils.audit_log import append_record
 from src.utils.file_utils import ensure_dir, list_images
 from src.utils.yaml_utils import save_yaml
 
+if TYPE_CHECKING:  # pragma: no cover - import cycle guard for type checking only
+    from src.core.metadata_store import MetadataStore
+
 _STEPS = ("plan", "annotate", "inspect", "split")
+
+MODEL_CALLS_FILENAME = "model_calls.jsonl"
+"""Per-task audit log of model calls, written by the recording hook."""
+
+RUN_HISTORY_FILENAME = "run_history.jsonl"
+"""Per-task audit log of step executions."""
 
 
 class Pipeline:
     """Runs the full or per-step annotation/training-prep pipeline for a task.
 
+    Every step is audited to ``tasks/<name>/run_history.jsonl``, and every model
+    call that actually happens to ``tasks/<name>/model_calls.jsonl``. Those
+    files, not the SQLite index, are the record: the index is a rebuildable
+    projection, so a ``metadata_store`` of ``None`` still produces a full log.
+
     Attributes:
         task_manager: TaskManager used for task storage and config IO.
         agents: Mapping of step name to agent instance.
+        metadata_store: Optional index to mirror the audit logs into.
         logger: Pipeline logger.
     """
 
@@ -37,6 +57,7 @@ class Pipeline:
         prompts_dir: Path = Path("prompts"),
         llm_settings: ModelSettings | None = None,
         vl_settings: ModelSettings | None = None,
+        metadata_store: MetadataStore | None = None,
     ) -> None:
         """Initialize the pipeline.
 
@@ -52,15 +73,22 @@ class Pipeline:
             vl_settings: Vision-language config for the annotate step; when its
                 provider is ``"remote"`` a client is injected into AnnotateAgent,
                 else the offline stub runs (no network/model downloads).
+            metadata_store: Optional metadata index. ``None`` keeps the audit
+                logs and skips indexing only.
         """
+        self.logger: logging.Logger = logging.getLogger(self.__class__.__name__)
         self.task_manager: TaskManager = task_manager
+        self.metadata_store: MetadataStore | None = metadata_store
+        # Which task the current thread is executing. Model calls are recorded
+        # by a hook that is not given the task name, and uvicorn runs steps in a
+        # thread pool, so the name travels per-thread rather than on self.
+        self._current_task: threading.local = threading.local()
         self.agents: dict[str, BaseAgent] = agents or self._default_agents(
             prompts_dir, llm_settings, vl_settings
         )
-        self.logger: logging.Logger = logging.getLogger(self.__class__.__name__)
 
-    @staticmethod
     def _default_agents(
+        self,
         prompts_dir: Path,
         llm_settings: ModelSettings | None,
         vl_settings: ModelSettings | None,
@@ -69,6 +97,9 @@ class Pipeline:
 
         Plan uses the text ``llm_settings``; annotate uses the multimodal
         ``vl_settings``; inspect is pure rule-based and takes no model.
+
+        Clients are wrapped in a :class:`RecordingClient` so the audit log can
+        later distinguish model-produced labels from stub-produced ones.
 
         Args:
             prompts_dir: Directory holding the prompt YAML files.
@@ -80,11 +111,86 @@ class Pipeline:
         """
         llm_client = build_model_client(llm_settings) if llm_settings is not None else None
         vl_client = build_model_client(vl_settings) if vl_settings is not None else None
+        plan_client = self._recorder(
+            llm_client or StubLLMClient(),
+            role="llm",
+            settings=llm_settings,
+            stub=llm_client is None,
+        )
         return {
-            "plan": PlanAgent({}, prompts_dir, llm_client=llm_client or StubLLMClient()),
-            "annotate": AnnotateAgent({}, prompts_dir, vl_client=vl_client),
+            "plan": PlanAgent({}, prompts_dir, llm_client=plan_client),
+            "annotate": AnnotateAgent(
+                {},
+                prompts_dir,
+                vl_client=(
+                    self._recorder(vl_client, role="vl", settings=vl_settings, stub=False)
+                    if vl_client is not None
+                    else None
+                ),
+            ),
             "inspect": InspectAgent({}, prompts_dir),
         }
+
+    def _recorder(
+        self,
+        client: VLClient,
+        *,
+        role: Role,
+        settings: ModelSettings | None,
+        stub: bool,
+    ) -> RecordingClient:
+        """Wrap a client so its calls land in the task's audit log.
+
+        Args:
+            client: Client to wrap (stub or remote).
+            role: ``llm`` or ``vl``.
+            settings: Settings the client was built from, for model/host labels.
+            stub: Whether ``client`` is the offline stub.
+
+        Returns:
+            A recording wrapper reporting to :meth:`_record_model_call`.
+        """
+        return RecordingClient(
+            client,
+            role=role,
+            provider="stub" if stub else "remote",
+            model=settings.model if settings is not None else "",
+            base_url=settings.base_url if settings is not None else "",
+            stub=stub,
+            hook=self._record_model_call,
+        )
+
+    def _record_model_call(self, record: ModelCallRecord) -> None:
+        """Append one model call to the running task's audit log and index it.
+
+        Args:
+            record: The call record; contains no prompts, images, or api_key.
+        """
+        task = self._current_task_name()
+        if not task:
+            return  # no step is running in this thread, so nothing to attribute
+        append_record(self.task_manager.task_dir(task) / MODEL_CALLS_FILENAME, record.model_dump())
+        store = self.metadata_store
+        if store is not None:
+            store.record_model_call(
+                task,
+                record.role,
+                record.provider,
+                record.model,
+                record.host,
+                record.status,
+                record.http_status,
+                record.duration_ms,
+                record.started_at,
+            )
+
+    def _current_task_name(self) -> str:
+        """Return the task this thread is currently running, if any.
+
+        Returns:
+            Task name, or ``""`` when no step is executing on this thread.
+        """
+        return str(getattr(self._current_task, "name", ""))
 
     def run_full(self, task_name: str) -> dict[str, Any]:
         """Run all steps for a task: plan, annotate, inspect, split.
@@ -101,7 +207,11 @@ class Pipeline:
         return results
 
     def run_step(self, task_name: str, step: str) -> Any:
-        """Run a single pipeline step for a task.
+        """Run a single pipeline step for a task and audit the execution.
+
+        The audit write sits in a ``finally`` and cannot change the outcome: the
+        step's return value and any exception propagate exactly as before, and
+        an unwritable log only produces a warning.
 
         Args:
             task_name: Name of an existing task.
@@ -121,18 +231,84 @@ class Pipeline:
         task_dir = self.task_manager.task_dir(task_name)
         self.logger.info("Running step '%s' for task '%s'", step, task_name)
 
-        result: Any
-        if step == "plan":
-            result = self._run_plan(task_dir, config)
-        elif step == "annotate":
-            result = self._run_annotate(task_dir, config)
-        elif step == "inspect":
-            result = self._run_inspect(task_dir, config)
-        else:
-            result = self._run_split(task_dir, config)
+        started_at = _utc_now()
+        started = time.perf_counter()
+        status = "ok"
+        items: int | None = None
+        message = ""
+        self._current_task.name = task_name
+        try:
+            result = self._dispatch(step, task_dir, config)
+            items = _step_items(step, result)
+            # Inside the try on purpose: a failure to persist the task config is
+            # a failed step, and the audit log has to say so.
+            self.task_manager.save_task_config(task_name, config)
+            return result
+        except Exception as exc:
+            status = "error"
+            message = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            self._record_run(task_name, step, status, started_at, started, items, message)
 
-        self.task_manager.save_task_config(task_name, config)
-        return result
+    def _dispatch(self, step: str, task_dir: Path, config: dict[str, Any]) -> Any:
+        """Run the step body without audit concerns.
+
+        Args:
+            step: Validated step name.
+            task_dir: Task directory.
+            config: Mutable task config dict.
+
+        Returns:
+            The step's raw result.
+        """
+        if step == "plan":
+            return self._run_plan(task_dir, config)
+        if step == "annotate":
+            return self._run_annotate(task_dir, config)
+        if step == "inspect":
+            return self._run_inspect(task_dir, config)
+        return self._run_split(task_dir, config)
+
+    def _record_run(
+        self,
+        task_name: str,
+        step: str,
+        status: str,
+        started_at: str,
+        started: float,
+        items: int | None,
+        message: str,
+    ) -> None:
+        """Append one step execution to the task's audit log and index it.
+
+        Args:
+            task_name: Task name.
+            step: Pipeline step.
+            status: ``ok`` or ``error``.
+            started_at: ISO 8601 UTC start timestamp.
+            started: ``perf_counter`` reading taken before the step.
+            items: Step-dependent count (labels written, issues found).
+            message: Error text for a failed step.
+        """
+        self._current_task.name = ""  # no model call may be attributed past this point
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        entry = RunEntry(
+            step=step,
+            status=status,
+            started_at=started_at,
+            finished_at=_utc_now(),
+            duration_ms=duration_ms,
+            items=items,
+            message=message,
+        )
+        append_record(
+            self.task_manager.task_dir(task_name) / RUN_HISTORY_FILENAME, entry.model_dump()
+        )
+        store = self.metadata_store
+        if store is not None:
+            store.record_run(task_name, step, status, started_at, duration_ms, items, message)
+            store.index_task(self.task_manager, task_name)
 
     def _run_plan(self, task_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
         """Generate (or regenerate) the training plan and merge it into config.
@@ -320,6 +496,35 @@ class Pipeline:
         )
         (dataset_dir / "train_command.txt").write_text(cmd + "\n", encoding="utf-8")
         return cmd
+
+
+def _utc_now() -> str:
+    """Return the current UTC time as a second-precision ISO 8601 string.
+
+    Returns:
+        Timestamp such as ``2026-09-27T10:20:30+00:00``.
+    """
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _step_items(step: str, result: Any) -> int | None:
+    """Extract the count shown in a step's history row.
+
+    Args:
+        step: Pipeline step name.
+        result: That step's return value.
+
+    Returns:
+        Number of labels written for ``annotate``, number of issues found for
+        ``inspect``, ``None`` for the steps where a count would be noise.
+    """
+    if step == "annotate" and isinstance(result, list):
+        return len(result)
+    if step == "inspect" and isinstance(result, dict):
+        errors = result.get("errors")
+        if isinstance(errors, dict):
+            return sum(len(v) for v in errors.values() if isinstance(v, list))
+    return None
 
 
 def normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:

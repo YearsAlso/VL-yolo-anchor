@@ -39,12 +39,22 @@ class StubLLMClient:
     end-to-end without downloading any model.
     """
 
-    def generate(self, system_prompt: str, user_prompt: str, *, max_new_tokens: int = 2048) -> str:
+    def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        image_path: Path | None = None,
+        max_new_tokens: int = 2048,
+    ) -> str:
         """Return a deterministic structured plan.
 
         Args:
             system_prompt: System-level instructions (ignored by the stub).
             user_prompt: User request containing the task description.
+            image_path: Ignored; accepted so callers (e.g. the recording
+                wrapper in :mod:`src.agents.model_client`) can forward a call
+                without knowing which client they hold.
             max_new_tokens: Maximum tokens (ignored by the stub).
 
         Returns:

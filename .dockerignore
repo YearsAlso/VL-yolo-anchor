@@ -25,6 +25,13 @@ node_modules
 # Local env / secrets
 .env
 *.local
+# Host-side encrypted store + local config overrides: these are machine state,
+# not source. Baking config/secrets.db into the image would ship the operator's
+# ciphertext (and it would be unreadable anyway without the master key).
+config/secrets.db
+config/secrets.db-journal
+config/overrides.yaml
+secrets
 
 # Editor/OS noise
 .DS_Store

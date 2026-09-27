@@ -20,13 +20,31 @@ services:
       VL_ANCHOR_HOST: 0.0.0.0
       VL_ANCHOR_DATA_DIR: /data
       VL_ANCHOR_CONFIG_DIR: /app/config
+      # Master key for the encrypted API-key store (config/secrets.db).
+      # Composed as a Docker secret below — uncomment both this line and the
+      # "secrets:" block once secrets/vl_master_key exists:
+      #   uv run python run.py secret-keygen > secrets/vl_master_key
+      # Left unset, the platform STILL RUNS: the settings page reports the
+      # secret store as unavailable and API keys must come from
+      # VL_LLM_API_KEY / VL_VL_API_KEY instead.
+      # VL_ANCHOR_SECRET_KEY_FILE: /run/secrets/vl_master_key
     volumes:
       - vl-data:/data
+      # Uncomment to persist GUI/CLI configuration changes: the image ships its
+      # own config/, so without this bind mount a saved config/overrides.yaml
+      # lives in the container's writable layer and disappears on recreate.
+      # The settings page detects this and greys out "save" (config_persistent).
+      # - ./config:/app/config
     ports:
       # Loopback-only: expose the raw API for local testing. Publish via a
       # TLS reverse proxy for real remote access, or drop this mapping and
       # reach the API only through the gui's /api proxy.
       - "127.0.0.1:8765:8765"
+    # Uncomment together with VL_ANCHOR_SECRET_KEY_FILE above. Docker secrets
+    # are mounted as files, so the key never appears in .env, in the image, or
+    # in "docker inspect" output.
+    # secrets:
+    #   - vl_master_key
     restart: unless-stopped
 
   gui:
@@ -45,3 +63,13 @@ services:
 
 volumes:
   vl-data:
+
+# File-based secret holding the Fernet master key for config/secrets.db.
+# Generate it first (and keep it OUT of git — .gitignore covers secrets/):
+#   uv run python run.py secret-keygen > secrets/vl_master_key
+# Then uncomment this block and the two "vl_master_key" references in the
+# backend service above. Compose refuses to start if a referenced secret file
+# is missing, so it stays commented out for the zero-config quickstart.
+# secrets:
+#   vl_master_key:
+#     file: ./secrets/vl_master_key

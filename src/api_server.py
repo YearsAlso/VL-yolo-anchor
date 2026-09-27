@@ -6,6 +6,7 @@ Run with: ``uv run uvicorn src.api_server:app --port 8765``
 from __future__ import annotations
 
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Any, Literal
 
@@ -14,7 +15,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from src.config import get_settings
+from src.agents.model_client import ProbeResult, probe_endpoint
+from src.config import Role, get_settings
+from src.core.config_store import ROLES, ConfigPatch, ConfigStore, EffectiveConfig, WriteResult
+from src.core.diagnostics import DiagnosticReport, Doctor
+from src.core.metadata_store import IndexStats, MetadataStore, TaskHistory, read_task_history
 from src.core.pipeline import Pipeline
 from src.core.task_manager import TaskManager
 from src.utils.file_utils import list_images
@@ -31,26 +36,50 @@ _settings = get_settings()
 # cross-origin relative to this backend, so CORS must allow them or the browser
 # silently blocks every response. The allowed origins are configurable via
 # VL_ANCHOR_CORS_ORIGINS so a deployment can list its own public URL.
+# PUT is required by the settings page; without it the browser's preflight fails
+# even though curl and TestClient would happily send the request.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_settings.cors_origins,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PUT"],
     allow_headers=["*"],
 )
 
 _TASKS_ROOT = _settings.tasks_root
 _task_manager = TaskManager(_TASKS_ROOT)
+_config_store = ConfigStore(_settings, _settings.config_dir)
+_doctor = Doctor(_settings, _task_manager, _settings.config_dir)
+_metadata_store = MetadataStore(_settings.db_path, enabled=_settings.db_enabled)
 _pipeline = Pipeline(
     _task_manager,
     prompts_dir=_settings.prompts_dir,
     llm_settings=_settings.llm,
     vl_settings=_settings.vl,
+    metadata_store=_metadata_store,
 )
 
 # Optional bearer-token auth for network-exposed deployments. When
 # VL_ANCHOR_AUTH_TOKEN is unset the middleware stays disabled so local desktop
 # use and the test-suite keep working without a token.
 _PUBLIC_PATHS = {"/api/health"}
+
+
+def _is_preflight(request: Request) -> bool:
+    """Report whether a request is a browser CORS preflight.
+
+    A preflight is an ``OPTIONS`` request carrying ``Access-Control-Request-Method``,
+    and browsers never attach the ``Authorization`` header to it. Rejecting it with
+    401 makes the browser report a CORS failure for requests that would have been
+    authenticated fine, so a deployment with a token configured could not use the
+    settings page at all.
+
+    Args:
+        request: Incoming request.
+
+    Returns:
+        True for preflight requests, which bypass the auth check.
+    """
+    return request.method == "OPTIONS" and "access-control-request-method" in request.headers
 
 
 @app.middleware("http")
@@ -67,7 +96,7 @@ async def auth_middleware(request: Request, call_next: Any) -> Any:
     """
     token = _settings.auth_token
     path = request.url.path
-    if token and path.startswith("/api") and path not in _PUBLIC_PATHS:
+    if token and path.startswith("/api") and path not in _PUBLIC_PATHS and not _is_preflight(request):
         provided = request.headers.get("authorization", "")
         if provided != f"Bearer {token}":
             return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
@@ -145,6 +174,20 @@ class LabeledImagesResponse(BaseModel):
     images: list[str]
 
 
+class ConfigTestRequest(BaseModel):
+    """Request body for probing one model endpoint.
+
+    The three overrides exist so the settings page can validate a key the user
+    has typed but not yet saved. Anything omitted falls back to the currently
+    effective value, so "test what is configured" is an empty body plus a role.
+    """
+
+    role: str = Field(..., description="Model role to probe: 'llm' or 'vl'")
+    base_url: str | None = Field(None, description="Endpoint to try instead of the configured one")
+    model: str | None = Field(None, description="Model name to try instead of the configured one")
+    api_key: str | None = Field(None, description="Key to try instead of the configured one")
+
+
 def _require_task(name: str) -> Path:
     """Resolve a task directory, rejecting unknown tasks without side effects.
 
@@ -172,9 +215,11 @@ def _safe_child(base_dir: Path, filename: str) -> Path:
 
     Rejects any value that is not a bare file name (separators ``/`` or ``\\``,
     ``..``, absolute paths) and, as a belt-and-braces check, verifies the
-    resolved target still lives under ``base_dir``. On Windows the Starlette
-    path regex ``[^/]+`` still admits backslashes, so the ``Path(name).name``
-    comparison is what actually blocks ``..\\..\\secret``.
+    resolved target still lives under ``base_dir``. Separators are rejected
+    explicitly rather than left to the ``Path(name).name`` comparison: on POSIX
+    a backslash is an ordinary file-name character, so that comparison alone
+    would let ``..\\..\\secret`` through, while the Starlette path regex
+    ``[^/]+`` admits backslashes on every platform.
 
     Args:
         base_dir: Directory the file must resolve within.
@@ -186,7 +231,7 @@ def _safe_child(base_dir: Path, filename: str) -> Path:
     Raises:
         HTTPException: 400 if the name attempts to escape ``base_dir``.
     """
-    if Path(filename).name != filename or filename in {"", ".", ".."}:
+    if filename in {"", ".", ".."} or "/" in filename or "\\" in filename or Path(filename).name != filename:
         raise HTTPException(status_code=400, detail=f"Invalid file name: {filename}")
     base = base_dir.resolve()
     target = (base / filename).resolve()
@@ -534,6 +579,138 @@ def get_image(name: str, image_name: str) -> FileResponse:
     if not image_path.is_file():
         raise HTTPException(status_code=404, detail=f"Image not found: {image_name}")
     return FileResponse(image_path)
+
+
+@app.get("/api/tasks/{name}/history", response_model=TaskHistory)
+def get_task_history(name: str, limit: int = 50) -> TaskHistory:
+    """Return a task's execution history, read from the on-disk audit logs.
+
+    Served from ``tasks/<name>/*.jsonl`` rather than the SQLite index: the logs
+    are the source of truth, so history stays correct even when the index is
+    missing or stale, and a task that never ran simply returns two empty lists.
+
+    Args:
+        name: Task name.
+        limit: Maximum entries per log, clamped by the metadata layer.
+
+    Returns:
+        Run and model-call entries, newest first.
+
+    Raises:
+        HTTPException: 404 if the task does not exist.
+    """
+    task_dir = _require_task(name)
+    return read_task_history(task_dir, task=name, limit=limit)
+
+
+@app.get("/api/index/stats", response_model=IndexStats)
+def get_index_stats() -> IndexStats:
+    """Return cross-task counts from the metadata index.
+
+    Unlike ``/api/tasks/{name}/history``, this reads SQLite: aggregating across
+    tasks is what the index is for. It is also the only endpoint that depends on
+    the database, so it is the only one that fails when the database is broken.
+
+    Returns:
+        Index row counts and availability.
+
+    Raises:
+        HTTPException: 503 if indexing is disabled or the database is unusable.
+    """
+    try:
+        stats = _metadata_store.stats()
+    except sqlite3.Error as exc:  # defensive: stats() reports rather than raises
+        raise HTTPException(status_code=503, detail=f"Metadata index unavailable: {exc}") from exc
+    if not stats.available:
+        raise HTTPException(status_code=503, detail=f"Metadata index unavailable: {stats.db_path}")
+    return stats
+
+
+@app.get("/api/config", response_model=EffectiveConfig)
+def get_config() -> EffectiveConfig:
+    """Return the effective configuration with per-field provenance.
+
+    Model keys are never included: ``api_key`` reports ``has_api_key`` and a
+    masked hint only.
+
+    Returns:
+        The effective configuration.
+    """
+    return _config_store.effective()
+
+
+@app.put("/api/config", response_model=WriteResult)
+def update_config(patch: ConfigPatch) -> Any:
+    """Apply configuration changes to ``overrides.yaml`` and the secret store.
+
+    Args:
+        patch: Per-role changes; omitted fields are left untouched.
+
+    Returns:
+        A :class:`WriteResult` listing what was written and what was skipped.
+        A body of ``{}`` (all fields ignored) is returned with status 409.
+
+    Raises:
+        HTTPException: 422 when the patch is empty or the merged result would be
+            invalid; 409 as described above.
+    """
+    errors = _config_store.validate_patch(patch)
+    if errors:
+        raise HTTPException(status_code=422, detail={"errors": errors})
+    result = _config_store.write(patch)
+    if not result.written and result.ignored:
+        # Nothing at all could be written (env-locked fields, read-only config
+        # dir, no secret store). 200 here would tell the GUI "saved" about a
+        # configuration that did not change.
+        return JSONResponse(status_code=409, content=result.model_dump())
+    return result
+
+
+@app.post("/api/config/test", response_model=ProbeResult)
+def test_config(request: ConfigTestRequest) -> ProbeResult:
+    """Probe one model endpoint with a single minimal request.
+
+    Args:
+        request: Role to probe plus optional temporary overrides.
+
+    Returns:
+        The probe outcome; a failed probe is a 200 with ``status="fail"`` and an
+        actionable hint, not an HTTP error — the endpoint answered, the check
+        just did not pass.
+
+    Raises:
+        HTTPException: 404 for an unknown role, 422 when no ``base_url`` is
+            available to probe.
+    """
+    if request.role not in ROLES:
+        raise HTTPException(status_code=404, detail=f"Unknown role: {request.role}")
+    role: Role = request.role
+    settings = _settings.llm if role == "llm" else _settings.vl
+    base_url = request.base_url if request.base_url is not None else settings.base_url
+    if not base_url.strip():
+        raise HTTPException(status_code=422, detail=f"No base_url to probe for role '{role}'")
+    return probe_endpoint(
+        settings,
+        role=role,
+        api_key_override=request.api_key,
+        base_url_override=request.base_url,
+        model_override=request.model,
+    )
+
+
+@app.get("/api/diagnostics", response_model=DiagnosticReport)
+def get_diagnostics(deep: bool = False) -> DiagnosticReport:
+    """Run the self-check and return its report.
+
+    Args:
+        deep: When ``True``, also probe the model endpoints (network calls) and
+            append the report to ``logs/diagnostics.jsonl``. Left ``False`` by
+            default so a GUI poll stays local and silent.
+
+    Returns:
+        The diagnostic report.
+    """
+    return _doctor.run(deep=deep)
 
 
 if __name__ == "__main__":

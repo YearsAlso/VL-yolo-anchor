@@ -42,6 +42,44 @@ capability). The previous flat `specs/*.spec.md` layout and the `changes/` stagi
 - GitHub Actions: `ci.yml` (ruff/mypy/pytest + GUI typecheck/build),
   `docker.yml` (build, and push to GHCR on `v*`/main), `release.yml`.
 - `LICENSE` (MIT), `SECURITY.md`, Docker deployment section in `README.md`.
+- Platform onboarding: `run.py doctor [--deep] [--json]` self-check (config
+  completeness, per-role endpoint connectivity, storage/prompt/secret-store
+  state), a fifth GUI tab holding the settings form, and an always-on banner
+  warning when `provider: stub` is producing placeholder boxes.
+- Config API + write-back layer: `GET/PUT /api/config`, `POST /api/config/test`,
+  `GET /api/diagnostics`; `config/overrides.yaml` sits between env and
+  `global.yaml`, every field reports its source (`env`/`overrides`/`yaml`/
+  `secrets`/`default`) and whether an env var has locked it; `global.yaml` is
+  never rewritten (its comments survive).
+- Encrypted secret store `config/secrets.db` (Fernet, master key only from
+  `VL_ANCHOR_SECRET_KEY[_FILE]`), `run.py secret-keygen` (prints, writes
+  nothing), `run.py secret-set NAME` (value read from stdin). API keys can no
+  longer reach disk in plaintext — an `api_key` in YAML is ignored and warned
+  about. Without a master key the store is simply unavailable and the platform
+  runs on env keys.
+- Metadata & audit logs: append-only `tasks/<name>/run_history.jsonl`,
+  `tasks/<name>/model_calls.jsonl` and `logs/diagnostics.jsonl` on disk as the
+  source of truth, plus `index.db` as a rebuildable SQLite projection
+  (`run.py index --rebuild`) behind `GET /api/index/stats`. Task history reads
+  the disk logs directly (`GET /api/tasks/{name}/history`) and works with no
+  database at all.
+- GUI: `Authorization: Bearer` injection (`VITE_AUTH_TOKEN` build-time, then
+  localStorage), execution history on the inspection page, settings page with
+  per-field source badges and connection tests.
+
+### Fixed
+- CORS preflight (`OPTIONS`) is no longer rejected by the bearer-token
+  middleware: browsers never attach `Authorization` to a preflight, so
+  `PUT /api/config` could not be sent at all on a deployment that enabled
+  `VL_ANCHOR_AUTH_TOKEN`. Regression-covered in `tests/test_api_server.py`.
+- `index --rebuild` now empties all four data tables before replaying the disk
+  logs instead of relying on `UNIQUE` + `INSERT OR IGNORE` alone, which left
+  orphaned rows behind when log lines disappeared (task removed, JSONL
+  truncated) and made the index drift from its source.
+- `start_gui.ps1` / `start_gui.sh` probe `/api/health` instead of `/api/tasks`
+  for the backend health check — the latter returns 401 once auth is enabled,
+  which aborted startup on a correctly configured deployment. Both scripts now
+  also run `doctor` and print a warning without blocking startup.
 
 ### Fixed (audit follow-ups)
 - CORS + relative `/api` in dev so the GUI actually receives backend data.

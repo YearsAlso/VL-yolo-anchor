@@ -53,6 +53,8 @@ specs/
 | `gui-launch-scripts/` | 已实施 | 一键启动脚本的进程跟踪与退出码传播 |
 | `test-suite/` | 已实施 | pytest 套件基线（**99 passed**）与断言纪律 |
 | `deployment/` | 已实施 | Linux Docker 自部署与远程模型端点（吸收了原部署提案） |
+| `platform-config/` | 已实施 | 配置读取/写回与来源标记、加密密钥库、doctor 自检与端点探测（跨栈，吸收原配置引导提案） |
+| `metadata-store/` | 已实施 | 磁盘审计日志（三份 JSONL）+ 可随时重建的 SQLite 派生索引 |
 | `audit-fixes/` | **已归档** | 2026-09-26 的 13 项审核问题修复批次 |
 
 > 新增/变更能力时同步本表，否则与 `docs/memory/pm-memory.md` 的 Spec 台账不一致，会被 `docs-consistency-review` 判为文档差异。
