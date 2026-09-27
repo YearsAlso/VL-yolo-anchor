@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock README.md ./
 # Export the locked runtime dependencies (no dev, no optional extras) and
 # install them into an isolated prefix we can copy into the runtime image.
-RUN uv export --frozen --no-dev --no-annotations -o requirements.txt \
+RUN uv export --frozen --no-dev --no-annotate -o requirements.txt \
     && pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # --- Runtime stage ---
