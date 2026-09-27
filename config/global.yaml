@@ -58,6 +58,22 @@ paths:
   prompts_dir: "prompts"
   config_dir: "config"
 
+database:
+  # Metadata index for cross-task execution history and stats.
+  #
+  # The disk is the only source of truth: every row here can be rebuilt from
+  # tasks/**/run_history.jsonl, tasks/**/model_calls.jsonl and
+  # logs/diagnostics.jsonl. So index.db may be deleted at any time and
+  # `run.py index --rebuild` restores it -- nothing in the platform's read
+  # paths depends on it, and losing it loses no data.
+  #
+  # Secrets do NOT live here: model keys are kept in config/secrets.db
+  # (encrypted, separate file) precisely so rebuilding this index cannot
+  # destroy them.
+  enabled: true
+  # Empty => <data_dir>/index.db. Env override: VL_ANCHOR_DB_PATH.
+  path: ""
+
 server:
   # Use 0.0.0.0 inside a container; expose via host port mapping / reverse proxy.
   host: "127.0.0.1"
