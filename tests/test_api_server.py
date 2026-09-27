@@ -1,16 +1,27 @@
-"""Tests for src.api_server (labels endpoints, task CRUD) via TestClient."""
+"""Tests for src.api_server (labels, task CRUD, config, diagnostics) via TestClient."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
 import pytest
 import src.api_server as api_server
 from fastapi.testclient import TestClient
+from src.agents.model_client import ProbeResult
+from src.config import Settings
+from src.core.config_store import ConfigStore
+from src.core.diagnostics import DiagnosticReport, Doctor
+from src.core.metadata_store import MODEL_CALLS_FILENAME, RUN_HISTORY_FILENAME, MetadataStore
 from src.core.pipeline import Pipeline
 from src.core.task_manager import TaskManager
+from src.utils.secrets import SecretStore, generate_master_key
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+"""Repository root, used to reach the checked-in ``config/global.yaml``."""
 
 
 def make_real_image(path: Path, w: int = 64, h: int = 48) -> Path:
@@ -431,3 +442,472 @@ def test_unreadable_label_file_returns_422(client: TestClient, monkeypatch) -> N
     res = client.get("/api/tasks/demo/labels/img_01.png")
     assert res.status_code == 422
     assert "Unreadable label file" in res.json()["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# Configuration / diagnostics / history endpoints (M3).
+#
+# These tests rebind the module-level singletons to a tmp_path config directory:
+# the shipped defaults point at the repository's own ``config/``, and a test must
+# never write ``overrides.yaml`` or ``secrets.db`` next to the checked-in files.
+# --------------------------------------------------------------------------- #
+
+
+def _isolated_settings(tmp_path: Path, **updates: Any) -> Settings:
+    """Build settings rooted in a temporary config directory.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+        updates: Extra ``Settings`` fields to override.
+
+    Returns:
+        A settings copy whose config dir, index DB and tasks root live under
+        ``tmp_path``.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    defaults: dict[str, Any] = {
+        "config_dir": config_dir,
+        "db_path": config_dir / "index.db",
+        "tasks_root": tmp_path / "tasks",
+    }
+    defaults.update(updates)
+    return api_server._settings.model_copy(update=defaults)
+
+
+@pytest.fixture
+def config_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """TestClient with an isolated config dir, encrypted store, and index.
+
+    A master key is installed so the secret store is usable by default; tests
+    that need the degraded path delete it. The endpoint/field environment
+    variables are cleared because the settings page's whole job is deciding what
+    the environment locks, and a stray variable in the developer's shell would
+    silently change which branch is under test.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        Configured ``fastapi.testclient.TestClient``.
+    """
+    monkeypatch.setenv("VL_ANCHOR_SECRET_KEY", generate_master_key())
+    monkeypatch.delenv("VL_ANCHOR_SECRET_KEY_FILE", raising=False)
+    for prefix in ("VL_VL_", "VL_LLM_", "VL_MODEL_"):
+        for suffix in ("PROVIDER", "BASE_URL", "NAME", "API_KEY"):
+            monkeypatch.delenv(f"{prefix}{suffix}", raising=False)
+
+    settings = _isolated_settings(tmp_path)
+    task_manager = TaskManager(settings.tasks_root)
+    monkeypatch.setattr(api_server, "_task_manager", task_manager)
+    monkeypatch.setattr(api_server, "_pipeline", Pipeline(task_manager))
+    monkeypatch.setattr(api_server, "_config_store", ConfigStore(settings, settings.config_dir))
+    monkeypatch.setattr(api_server, "_doctor", Doctor(settings, task_manager, settings.config_dir))
+    monkeypatch.setattr(api_server, "_metadata_store", MetadataStore(settings.db_path))
+    return TestClient(api_server.app)
+
+
+def _config_dir(tmp_path: Path) -> Path:
+    """Return the config directory the ``config_client`` fixture uses.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        ``tmp_path/config``.
+    """
+    return tmp_path / "config"
+
+
+def _append_jsonl(task_dir: Path, filename: str, record: dict[str, Any]) -> None:
+    """Append one JSON line to an audit log.
+
+    Args:
+        task_dir: Task directory.
+        filename: Log file name (``run_history.jsonl`` / ``model_calls.jsonl``).
+        record: Record to serialize.
+    """
+    with (task_dir / filename).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
+def test_get_config_contract_and_field_sources(
+    config_client: TestClient, tmp_path: Path
+) -> None:
+    """GET /api/config describes every field, its layer, and the secret store."""
+    res = config_client.get("/api/config")
+    assert res.status_code == 200
+    body = res.json()
+    assert set(body) == {"llm", "vl", "storage", "server", "inference", "secrets"}
+    assert body["vl"]["provider"]["value"] == "stub"
+    assert body["vl"]["provider"]["source"] == "default"
+    assert body["vl"]["provider"]["locked"] is False
+    assert body["secrets"]["available"] is True
+    assert body["secrets"]["store_path"] == str(_config_dir(tmp_path) / "secrets.db")
+    assert body["storage"]["config_dir"] == str(_config_dir(tmp_path))
+    assert body["storage"]["config_writable"] is True
+    assert body["server"]["auth_enabled"] is False
+
+
+def test_get_config_never_returns_a_plaintext_key(
+    config_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An api_key is reported as locked/masked metadata, never as a value."""
+    monkeypatch.setenv("VL_VL_API_KEY", "env-key-abcd1234")
+    res = config_client.get("/api/config")
+    assert res.status_code == 200
+    assert "env-key-abcd1234" not in res.text
+    vl = res.json()["vl"]
+    assert vl["api_key"]["value"] is None
+    assert vl["api_key"]["source"] == "env"
+    assert vl["api_key"]["locked"] is True
+    assert vl["api_key"]["locked_by"] == "VL_VL_API_KEY"
+    assert vl["has_api_key"] is True
+    assert vl["api_key_masked"] == "****1234"
+
+
+def test_put_config_writes_overrides_and_takes_effect_after_restart(
+    config_client: TestClient, tmp_path: Path
+) -> None:
+    """PUT writes non-secret fields to overrides.yaml; a fresh read sees them.
+
+    The settings snapshot is process-cached, so the running process keeps serving
+    the old values until a restart — which is exactly what ``restart_required``
+    tells the GUI to say. A newly built store therefore stands in for the restart.
+    """
+    res = config_client.put(
+        "/api/config",
+        json={"vl": {"provider": "remote", "base_url": "http://127.0.0.1:8000/v1", "model": "qwen2.5vl"}},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["written"]["vl"] == {
+        "provider": "remote",
+        "base_url": "http://127.0.0.1:8000/v1",
+        "model": "qwen2.5vl",
+    }
+    assert body["ignored"] == []
+    assert body["restart_required"] is True
+    assert body["overrides_path"] == str(_config_dir(tmp_path) / "overrides.yaml")
+
+    settings = _isolated_settings(tmp_path)
+    restarted = ConfigStore(settings, settings.config_dir)
+    vl = restarted.effective().vl
+    assert vl.provider.value == "remote"
+    assert vl.provider.source == "overrides"
+    assert vl.base_url.value == "http://127.0.0.1:8000/v1"
+
+
+def test_put_config_keeps_global_yaml_untouched(config_client: TestClient, tmp_path: Path) -> None:
+    """Acceptance 5: write-back must not re-serialize global.yaml.
+
+    A YAML round-trip would strip every comment and commented-out example from a
+    file whose whole value is that documentation.
+    """
+    original = (REPO_ROOT / "config" / "global.yaml").read_bytes()
+    (_config_dir(tmp_path) / "global.yaml").write_bytes(original)
+    assert config_client.put("/api/config", json={"llm": {"model": "gpt-4o-mini"}}).status_code == 200
+    assert (_config_dir(tmp_path) / "global.yaml").read_bytes() == original
+
+
+def test_put_config_stores_api_key_encrypted(config_client: TestClient, tmp_path: Path) -> None:
+    """Acceptance 11: a submitted key lands in the encrypted store, in no file as text."""
+    secret = "vl-secret-9f2a"
+    res = config_client.put(
+        "/api/config",
+        json={
+            "vl": {
+                "provider": "remote",
+                "base_url": "http://127.0.0.1:8000/v1",
+                "model": "qwen2.5vl",
+                "api_key": secret,
+            }
+        },
+    )
+    assert res.status_code == 200
+    assert res.json()["written"]["vl"]["api_key"] == "***"
+    assert secret not in res.text
+
+    overrides = (_config_dir(tmp_path) / "overrides.yaml").read_text(encoding="utf-8")
+    assert secret not in overrides
+    assert "api_key" not in overrides
+
+    store_path = _config_dir(tmp_path) / "secrets.db"
+    assert store_path.is_file()
+    assert secret.encode() not in store_path.read_bytes()
+    assert SecretStore(store_path).get("VL_VL_API_KEY") == secret
+
+    vled = config_client.get("/api/config")
+    assert vled.status_code == 200
+    assert secret not in vled.text
+    assert vled.json()["vl"]["has_api_key"] is True
+    assert vled.json()["vl"]["api_key_masked"] == "****9f2a"
+    assert vled.json()["vl"]["api_key"]["source"] == "secrets"
+
+
+def test_put_config_rejects_invalid_patch(config_client: TestClient, tmp_path: Path) -> None:
+    """422 carries the validation errors and writes nothing."""
+    res = config_client.put("/api/config", json={"vl": {"provider": "remote"}})
+    assert res.status_code == 422
+    errors = res.json()["detail"]["errors"]
+    assert any("base_url" in message for message in errors)
+    assert any("model" in message for message in errors)
+
+    empty = config_client.put("/api/config", json={})
+    assert empty.status_code == 422
+    assert empty.json()["detail"]["errors"] == ["未提交任何字段。"]
+
+    assert not (_config_dir(tmp_path) / "overrides.yaml").exists()
+
+
+def test_put_config_all_fields_locked_returns_409(
+    config_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """409 means "nothing was saved": no field may be reported as written."""
+    monkeypatch.setenv("VL_VL_PROVIDER", "remote")
+    monkeypatch.setenv("VL_VL_BASE_URL", "http://locked:8000/v1")
+    monkeypatch.setenv("VL_VL_NAME", "locked-model")
+    res = config_client.put(
+        "/api/config",
+        json={"vl": {"provider": "remote", "base_url": "http://other:9000/v1", "model": "other"}},
+    )
+    assert res.status_code == 409
+    body = res.json()
+    assert body["written"] == {}
+    assert {item["reason"] for item in body["ignored"]} == {"env_locked"}
+    assert {item["field"] for item in body["ignored"]} == {"provider", "base_url", "model"}
+    assert not (_config_dir(tmp_path) / "overrides.yaml").exists()
+
+
+def test_put_config_reports_partially_locked_fields(
+    config_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A patch mixing locked and free fields is a 200 that names the skipped ones."""
+    monkeypatch.setenv("VL_VL_PROVIDER", "stub")
+    res = config_client.put("/api/config", json={"vl": {"provider": "stub", "model": "qwen2.5vl"}})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["written"]["vl"] == {"model": "qwen2.5vl"}
+    assert body["ignored"] == [{"role": "vl", "field": "provider", "reason": "env_locked"}]
+
+
+def test_put_config_without_master_key_ignores_api_key(
+    config_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance 13: no master key → the key is ignored and the store is not created.
+
+    The status is 409 rather than 200 because the key was the only field in the
+    patch and nothing at all was saved — the same rule as any other all-ignored
+    request.
+    """
+    monkeypatch.delenv("VL_ANCHOR_SECRET_KEY", raising=False)
+    res = config_client.put("/api/config", json={"vl": {"api_key": "unreachable-secret"}})
+    assert res.status_code == 409
+    body = res.json()
+    assert body["written"] == {}
+    assert body["ignored"] == [{"role": "vl", "field": "api_key", "reason": "no_secret_store"}]
+    assert "unreachable-secret" not in res.text
+    assert not (_config_dir(tmp_path) / "secrets.db").exists()
+
+
+def test_config_put_preflight_is_allowed(config_client: TestClient) -> None:
+    """The browser sends a preflight for PUT; without it the settings page cannot save."""
+    res = config_client.options(
+        "/api/config",
+        headers={"Origin": "http://localhost:5173", "Access-Control-Request-Method": "PUT"},
+    )
+    assert res.status_code == 200
+    assert "PUT" in res.headers.get("access-control-allow-methods", "")
+
+
+def test_config_put_preflight_is_allowed_with_auth_enabled(
+    config_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A preflight carries no Authorization header, so it must bypass the auth check.
+
+    Found by running the real stack with VL_ANCHOR_AUTH_TOKEN set: the browser's
+    OPTIONS got a 401, which the browser surfaces as a CORS error — so enabling
+    auth (acceptance 8) made the settings page unable to save at all.
+    """
+    secured = api_server._settings.model_copy(
+        update={"auth_token": "tok-123", "auth_token_source": "VL_ANCHOR_AUTH_TOKEN"}
+    )
+    monkeypatch.setattr(api_server, "_settings", secured)
+
+    res = config_client.options(
+        "/api/config",
+        headers={"Origin": "http://localhost:5173", "Access-Control-Request-Method": "PUT"},
+    )
+    assert res.status_code == 200
+    assert "PUT" in res.headers.get("access-control-allow-methods", "")
+
+    # The exemption is narrow: the actual PUT still needs the token, and an
+    # OPTIONS that is not a preflight does not get a free pass either.
+    assert config_client.put("/api/config", json={"vl": {"model": "m"}}).status_code == 401
+    assert config_client.options("/api/config").status_code == 401
+
+
+def test_config_test_role_validation(config_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """404 for an unknown role; 422 when there is no base_url to probe."""
+    assert config_client.post("/api/config/test", json={"role": "vision"}).status_code == 404
+
+    # Pin the endpoint empty: the assertion is about the route's own guard, not
+    # about whatever the ambient environment happens to configure.
+    model = api_server._settings.vl.model_copy(update={"base_url": ""})
+    monkeypatch.setattr(api_server, "_settings", api_server._settings.model_copy(update={"vl": model}))
+    res = config_client.post("/api/config/test", json={"role": "vl"})
+    assert res.status_code == 422
+    assert "base_url" in res.json()["detail"]
+
+
+def test_config_test_forwards_overrides_to_probe(
+    config_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe receives exactly what the settings page typed, unsaved."""
+    captured: dict[str, Any] = {}
+
+    def _fake_probe(settings: Any, **kwargs: Any) -> ProbeResult:
+        captured.update(kwargs)
+        return ProbeResult(role=kwargs["role"], status="ok", latency_ms=12, http_status=200, message="ok")
+
+    monkeypatch.setattr(api_server, "probe_endpoint", _fake_probe)
+    res = config_client.post(
+        "/api/config/test",
+        json={"role": "llm", "base_url": "http://127.0.0.1:9/v1", "api_key": "typed-but-unsaved"},
+    )
+    assert res.status_code == 200
+    assert res.json() == {
+        "role": "llm",
+        "status": "ok",
+        "latency_ms": 12,
+        "http_status": 200,
+        "message": "ok",
+        "hint": "",
+    }
+    assert captured["role"] == "llm"
+    assert captured["base_url_override"] == "http://127.0.0.1:9/v1"
+    assert captured["api_key_override"] == "typed-but-unsaved"
+
+
+def test_diagnostics_shallow_run_is_local(config_client: TestClient) -> None:
+    """Default diagnostics: 200 with the stub warning, no probes, no log written."""
+    res = config_client.get("/api/diagnostics")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "warn"
+    assert body["probes"] == []
+    by_id = {check["id"]: check for check in body["checks"]}
+    assert by_id["config.vl.provider"]["status"] == "warn"
+    assert by_id["model.vl.connectivity"]["status"] == "skip"
+    assert by_id["storage.prompts"]["status"] == "ok"
+    assert by_id["config.paths.secret_store"]["status"] == "ok"
+    assert not (api_server._settings.logs_dir / "diagnostics.jsonl").exists()
+
+
+def test_diagnostics_deep_flag_is_forwarded(
+    config_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`?deep=true` is what enables probing; the default must never reach the network."""
+    seen: list[bool] = []
+
+    class _FakeDoctor:
+        """Doctor stand-in: records the flag instead of probing."""
+
+        def run(self, *, deep: bool = False) -> DiagnosticReport:
+            seen.append(deep)
+            return DiagnosticReport(status="ok", generated_at="2026-01-01T00:00:00Z", checks=[])
+
+    monkeypatch.setattr(api_server, "_doctor", _FakeDoctor())
+    assert config_client.get("/api/diagnostics").json()["status"] == "ok"
+    assert config_client.get("/api/diagnostics?deep=true").json()["status"] == "ok"
+    assert seen == [False, True]
+
+
+def test_history_endpoint_reads_disk(config_client: TestClient) -> None:
+    """History comes from the JSONL logs, newest first, with a limit."""
+    assert config_client.get("/api/tasks/ghost/history").status_code == 404
+    config_client.post("/api/tasks", json={"name": "demo", "description": "d"})
+    task_dir = api_server._task_manager.task_dir("demo")
+    assert config_client.get("/api/tasks/demo/history").json() == {
+        "task": "demo",
+        "runs": [],
+        "calls": [],
+        "source": "jsonl",
+    }
+
+    for step, stamp in (("plan", "2026-01-01T00:00:01Z"), ("annotate", "2026-01-01T00:00:02Z")):
+        _append_jsonl(
+            task_dir,
+            RUN_HISTORY_FILENAME,
+            {
+                "step": step,
+                "status": "ok",
+                "started_at": stamp,
+                "finished_at": stamp,
+                "duration_ms": 5,
+                "items": None,
+                "message": "",
+            },
+        )
+    _append_jsonl(
+        task_dir,
+        MODEL_CALLS_FILENAME,
+        {
+            "role": "llm",
+            "provider": "stub",
+            "model": "",
+            "host": "",
+            "status": "stub",
+            "http_status": None,
+            "duration_ms": 2,
+            "started_at": "2026-01-01T00:00:01Z",
+        },
+    )
+
+    body = config_client.get("/api/tasks/demo/history").json()
+    assert [run["step"] for run in body["runs"]] == ["annotate", "plan"]
+    assert body["calls"][0]["status"] == "stub"
+    assert len(config_client.get("/api/tasks/demo/history?limit=1").json()["runs"]) == 1
+
+
+def test_index_stats_endpoint(
+    config_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """200 reports an empty-but-usable index; 503 reports one that cannot be read."""
+    res = config_client.get("/api/index/stats")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["available"] is True and body["tasks"] == 0
+    # A read path must not create the database: zeros are reported, not materialized.
+    assert not (_config_dir(tmp_path) / "index.db").exists()
+
+    unreachable = MetadataStore(_config_dir(tmp_path) / "gone" / "index.db")
+    monkeypatch.setattr(api_server, "_metadata_store", unreachable)
+    assert config_client.get("/api/index/stats").status_code == 503
+
+    meta = api_server._metadata_store
+    monkeypatch.setattr(api_server, "_metadata_store", MetadataStore(meta.db_path, enabled=False))
+    assert config_client.get("/api/index/stats").status_code == 503
+
+
+def test_new_endpoints_require_the_auth_token(
+    config_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance 8: with a token configured, every new endpoint is 401 without it."""
+    secured = api_server._settings.model_copy(
+        update={"auth_token": "tok-123", "auth_token_source": "VL_ANCHOR_AUTH_TOKEN"}
+    )
+    monkeypatch.setattr(api_server, "_settings", secured)
+
+    assert config_client.get("/api/health").status_code == 200
+    for path in ("/api/config", "/api/diagnostics", "/api/index/stats", "/api/tasks/ghost/history"):
+        assert config_client.get(path).status_code == 401, path
+        assert config_client.get(path, headers={"Authorization": "Bearer tok-123"}).status_code in {200, 404}
+    assert config_client.put("/api/config", json={"vl": {"model": "m"}}).status_code == 401
+    assert (
+        config_client.put(
+            "/api/config", json={"vl": {"model": "m"}}, headers={"Authorization": "Bearer tok-123"}
+        ).status_code
+        == 200
+    )
