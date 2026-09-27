@@ -38,12 +38,15 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # 4. Health check: wait for the backend to answer, abort if it dies early.
+#    /api/health is the one endpoint that stays reachable when API auth is on;
+#    probing /api/tasks would report "unhealthy" on a correctly configured
+#    deployment that simply requires a bearer token.
 healthy=false
 for _ in $(seq 1 20); do
   if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
     break
   fi
-  if curl -fs --max-time 1 "http://127.0.0.1:8765/api/tasks" >/dev/null 2>&1; then
+  if curl -fs --max-time 1 "http://127.0.0.1:8765/api/health" >/dev/null 2>&1; then
     healthy=true
     break
   fi
@@ -52,6 +55,27 @@ done
 if [[ "$healthy" == false ]]; then
   echo "[start_gui] Backend failed to become healthy on 8765." >&2
   exit 1
+fi
+
+# 4b. Self-check. Advisory only: a misconfigured platform still starts (the GUI
+#     needs to be reachable precisely when the configuration is wrong), but the
+#     user is told loudly, and pointed at the settings page that fixes it.
+echo "[start_gui] Running platform self-check (run.py doctor) ..."
+set +e
+DOCTOR_OUT="$(cd "$ROOT" && "$BACKEND_EXE" run.py doctor 2>&1)"
+DOCTOR_CODE=$?
+set -e
+printf '%s\n' "$DOCTOR_OUT"
+if [[ "$DOCTOR_CODE" -ne 0 ]] || grep -q -e '\[WARN\]' -e '\[FAIL\]' <<<"$DOCTOR_OUT"; then
+  echo "" >&2
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
+  echo "[start_gui] WARNING: the self-check found problems (see above)." >&2
+  echo "[start_gui] The GUI still starts, but the platform may be producing" >&2
+  echo "[start_gui] STUB (fake) labels instead of real model output." >&2
+  echo "[start_gui] Open the \"settings\" tab to fix the model configuration," >&2
+  echo "[start_gui] or run: .venv/bin/python run.py doctor --deep" >&2
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
+  echo "" >&2
 fi
 
 # 5. Frontend deps

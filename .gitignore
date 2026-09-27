@@ -23,3 +23,14 @@ src-tauri/target/
 /data/
 dist-assets/
 *.log
+
+# Local configuration state: machine-specific, and the secret store is
+# key material. Neither belongs in git (config/ otherwise ships global.yaml +
+# task_template.yaml, which ARE tracked).
+config/overrides.yaml
+config/secrets.db*
+secrets/
+
+# Rebuildable metadata index projection — delete and re-derive at any time with
+# "uv run python run.py index --rebuild". Matches index.db, index.db-wal, ...
+index.db*
