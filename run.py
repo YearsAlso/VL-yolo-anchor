@@ -13,6 +13,7 @@ import logging
 import sys
 from pathlib import Path
 
+from src.config import get_settings
 from src.core.pipeline import Pipeline
 from src.core.task_manager import TaskManager
 
@@ -49,8 +50,15 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO),
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-    task_manager = TaskManager(Path(args.tasks_root))
-    pipeline = Pipeline(task_manager)
+    settings = get_settings()
+    tasks_root = Path(args.tasks_root) if args.tasks_root != "tasks" else settings.tasks_root
+    task_manager = TaskManager(tasks_root)
+    pipeline = Pipeline(
+        task_manager,
+        prompts_dir=settings.prompts_dir,
+        llm_settings=settings.llm,
+        vl_settings=settings.vl,
+    )
 
     if args.command == "create":
         try:

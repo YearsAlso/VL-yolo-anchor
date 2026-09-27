@@ -1,10 +1,20 @@
 /** Axios-based API client for the FastAPI backend (127.0.0.1:8765). */
 
 import axios from "axios";
-import type { ExportSummary, ImageItem, InspectionReport, OBBBox, TaskPlan } from "../types";
+import type { ExportSummary, ImageItem, InspectionReport, LabelResult, TaskPlan } from "../types";
+
+// API base resolution, highest priority first:
+// 1. VITE_API_BASE build arg — set to "" for the Docker/nginx image so the SPA
+//    calls the same-origin "/api" that nginx reverse-proxies to the backend.
+// 2. Dev server — relative, so the Vite proxy forwards "/api" to the backend
+//    (same-origin: no CORS preflight, no tainted canvas).
+// 3. Desktop (Tauri) production — no proxy, target the local backend directly
+//    and rely on the backend's CORS allowlist for the tauri origin.
+export const API_BASE: string =
+  import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? "" : "http://127.0.0.1:8765");
 
 const api = axios.create({
-  baseURL: "http://127.0.0.1:8765",
+  baseURL: API_BASE,
   timeout: 120_000,
 });
 
@@ -55,7 +65,7 @@ export async function listImages(task: string): Promise<ImageItem[]> {
 
 /** Build an absolute image URL from the API-relative one. */
 export function imageUrl(url: string): string {
-  return url.startsWith("http") ? url : `http://127.0.0.1:8765${url}`;
+  return url.startsWith("http") ? url : `${API_BASE}${url}`;
 }
 
 /** Fetch the export summary produced by the split step. */
@@ -71,9 +81,9 @@ export async function listLabeledImages(task: string): Promise<string[]> {
 }
 
 /** Fetch the OBB boxes for one image (candidate labels take priority). */
-export async function getLabelBoxes(task: string, imageName: string): Promise<OBBBox[]> {
-  const res = await api.get<{ image: string; boxes: OBBBox[] }>(
+export async function getLabelBoxes(task: string, imageName: string): Promise<LabelResult> {
+  const res = await api.get<LabelResult & { image: string }>(
     `/api/tasks/${encodeURIComponent(task)}/labels/${encodeURIComponent(imageName)}`,
   );
-  return res.data.boxes;
+  return { boxes: res.data.boxes, source: res.data.source };
 }

@@ -8,12 +8,14 @@ the same prompt-rendering + JSON-parsing interface.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from src.agents.base_agent import BaseAgent
+from src.agents.model_client import VLClient
 from src.utils.file_utils import ensure_dir, list_images
 from src.utils.image_utils import load_image
 from src.utils.obb_utils import denormalize_points, normalize_points, rotated_box_to_four_points
@@ -21,6 +23,24 @@ from src.utils.obb_utils import denormalize_points, normalize_points, rotated_bo
 
 class AnnotateAgent(BaseAgent):
     """Agent that produces YOLO-OBB label files for all images in a task."""
+
+    def __init__(
+        self,
+        config: dict[str, Any],
+        prompt_dir: Path,
+        vl_client: VLClient | None = None,
+    ) -> None:
+        """Initialize the annotate agent.
+
+        Args:
+            config: Configuration mapping.
+            prompt_dir: Directory holding ``annotate_agent.yaml``.
+            vl_client: Optional remote VL backend; when ``None`` a
+                deterministic offline stub is used so the pipeline runs with no
+                model or network.
+        """
+        super().__init__(config, prompt_dir)
+        self.vl_client: VLClient | None = vl_client
 
     def run(self, task_dir: Path, task_config: dict[str, Any]) -> list[Path]:
         """Annotate every image in ``task_dir/images``.
@@ -69,6 +89,7 @@ class AnnotateAgent(BaseAgent):
                     exclude_items=", ".join(sorted(exclude_items)) or "none",
                 ),
                 user_prompt,
+                image_path,
             )
             lines = self._detections_to_yolo_lines(detections, w, h, conf_threshold, min_pixels)
             label_path = labels_dir / f"{image_path.stem}.txt"
@@ -94,23 +115,53 @@ class AnnotateAgent(BaseAgent):
         """
         return template.format(image_name=image_path.name, w=w, h=h, min_pixel=min_pixel)
 
-    def _infer(self, system_prompt: str, user_prompt: str) -> list[dict[str, Any]]:
-        """Run VL inference for one image (stubbed).
+    def _infer(
+        self, system_prompt: str, user_prompt: str, image_path: Path | None = None
+    ) -> list[dict[str, Any]]:
+        """Run VL inference for one image.
 
-        The stub returns one deterministic mid-image box so downstream steps
-        have data. A real backend would run the local Qwen2.5-VL model here
-        (4-bit quantized on GPU, CPU fallback) and parse its JSON output.
+        When a remote ``vl_client`` is configured it is called with the image
+        attached; otherwise a deterministic stub returns one mid-image box so
+        downstream steps have data offline.
 
         Args:
             system_prompt: Rendered system prompt with class mapping/rules.
             user_prompt: Rendered user prompt for the image.
+            image_path: Image being annotated (used by the remote backend).
 
         Returns:
             List of detections, each ``{"cls": int, "obb": [8 floats], "conf": float}``.
         """
-        del system_prompt, user_prompt  # stub: no actual model call
-        obb = rotated_box_to_four_points(0.5, 0.5, 0.3, 0.2, 0.0)
-        return [{"cls": 0, "obb": [round(v, 6) for v in obb], "conf": 0.92}]
+        if self.vl_client is None:
+            obb = rotated_box_to_four_points(0.5, 0.5, 0.3, 0.2, 0.0)
+            return [{"cls": 0, "obb": [round(v, 6) for v in obb], "conf": 0.92}]
+        raw = self.vl_client.generate(system_prompt, user_prompt, image_path=image_path)
+        return self._parse_detections(raw)
+
+    def _parse_detections(self, raw: str) -> list[dict[str, Any]]:
+        """Parse a VL text response into a detections list.
+
+        Tolerates surrounding prose or Markdown code fences by extracting the
+        first JSON array found.
+
+        Args:
+            raw: Raw model text output.
+
+        Returns:
+            List of detection dicts; empty when nothing parseable is found.
+        """
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        if not match:
+            self.logger.warning("VL response contained no JSON array; treating as no detections.")
+            return []
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            self.logger.warning("Failed to decode VL JSON array; treating as no detections.")
+            return []
+        if not isinstance(data, list):
+            return []
+        return [d for d in data if isinstance(d, dict)]
 
     def _detections_to_yolo_lines(
         self,

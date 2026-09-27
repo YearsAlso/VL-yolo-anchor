@@ -1,0 +1,47 @@
+# VL-YOLO-Anchor self-hosting stack.
+#   docker compose up -d --build
+# Browser: http://localhost:8080  (nginx serves the SPA and proxies /api).
+# Direct backend API (optional, loopback only): http://127.0.0.1:8765
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vl-yolo-anchor-backend:${VERSION:-0.1.0}
+    # .env carries VL_MODEL_* (remote endpoint / key) and VL_ANCHOR_*.
+    # Optional so a bare "docker compose up" works before you copy .env.example.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Inside the container bind all interfaces; the volume is the writable
+      # root for tasks/ and logs/.
+      VL_ANCHOR_HOST: 0.0.0.0
+      VL_ANCHOR_DATA_DIR: /data
+      VL_ANCHOR_CONFIG_DIR: /app/config
+    volumes:
+      - vl-data:/data
+    ports:
+      # Loopback-only: expose the raw API for local testing. Publish via a
+      # TLS reverse proxy for real remote access, or drop this mapping and
+      # reach the API only through the gui's /api proxy.
+      - "127.0.0.1:8765:8765"
+    restart: unless-stopped
+
+  gui:
+    build:
+      context: ./gui
+      dockerfile: Dockerfile
+      args:
+        # Relative base -> same-origin /api handled by nginx below.
+        VITE_API_BASE: ""
+    image: vl-yolo-anchor-gui:${VERSION:-0.1.0}
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+volumes:
+  vl-data:

@@ -1,11 +1,47 @@
 # Global platform configuration
+# Every value below can be overridden at runtime by environment variables
+# (see src/config.py). In Docker, .env / compose provide those overrides so the
+# same image works for desktop (stub) and server (remote LLM/VL) deployments.
+#
+# Two model roles are wired to two different agents:
+#   llm -> PlanAgent      (text only: task description -> structured plan)
+#   vl  -> AnnotateAgent  (vision+text: image -> OBB boxes)
+# InspectAgent is pure rule-based and uses no model.
+# The top-level `model:` keys below are the SHARED default; `llm:` / `vl:`
+# sub-blocks override per role. Env prefixes: VL_MODEL_* (shared),
+# VL_LLM_* / VL_VL_* (per role).
 model:
-  # Local VL model for annotation (Qwen2.5-VL recommended)
-  vl_model_name: "Qwen/Qwen2.5-VL-7B-Instruct"
+  # provider: "stub" = offline deterministic pseudo output (no network/model).
+  #           "remote" = call an OpenAI-compatible endpoint below.
+  provider: "stub"
+  # Remote endpoint root that exposes /chat/completions (vLLM, Ollama OpenAI
+  # shim, llama.cpp server, hosted API, ...). Required when provider=remote.
+  base_url: ""
+  # Inject via VL_MODEL_API_KEY env var instead of storing the key here.
+  api_key: ""
+  model: ""
+  timeout_s: 120
+  max_retries: 2
+  max_new_tokens: 2048
+
+  # --- Plan step: text LLM. Uncomment to differ from the shared default. ---
+  # llm:
+  #   provider: "remote"
+  #   base_url: "https://api.example.com/v1"
+  #   api_key: ""            # prefer VL_LLM_API_KEY env
+  #   model: "gpt-4o-mini"   # any strong text model
+
+  # --- Annotate step: vision-language model. ---
+  # vl:
+  #   provider: "remote"
+  #   base_url: "http://host.docker.internal:11434/v1"  # e.g. local Ollama/vLLM
+  #   api_key: ""            # prefer VL_VL_API_KEY env
+  #   model: "qwen2.5vl:7b"
+
+  # --- Legacy local-inference knobs (reserved for the optional future local
+  #     4-bit backend; unused while provider is remote/stub) ---
   load_in_4bit: true
   device: "auto"          # auto | cuda | cpu
-  max_new_tokens: 2048
-  # GPU VRAM limit in MB (for 3060Ti ~8000MB total)
   max_gpu_memory_mb: 7000
 
 inference:
@@ -15,11 +51,15 @@ inference:
   enable_cpu_fallback: true
 
 paths:
+  # Writable root for tasks/ and logs/. In Docker point this at a volume,
+  # e.g. VL_ANCHOR_DATA_DIR=/data.
+  data_dir: "."
   tasks_root: "tasks"
   prompts_dir: "prompts"
   config_dir: "config"
 
 server:
+  # Use 0.0.0.0 inside a container; expose via host port mapping / reverse proxy.
   host: "127.0.0.1"
   port: 8765
   reload: false

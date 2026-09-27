@@ -1,0 +1,15 @@
+schema_version: 1
+module_path: ""
+title: VL-YOLO-Anchor 多模态标注与训练计划平台
+scope:
+    - CLAUDE.md
+    - pyproject.toml
+    - uv.lock
+    - .gitignore
+    - run.py
+    - start_gui.ps1
+    - start_gui.sh
+    - README.md
+source_files: []
+depends_on: []
+related_to: []

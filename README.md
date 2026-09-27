@@ -108,6 +108,45 @@ uv run uvicorn src.api_server:app --host 127.0.0.1 --port 8765
 `npm run tauri dev`）。GUI 含四个标签页：任务与计划、标注审核（OBB 画布，缩放/平移）、
 质检报告、训练导出。
 
+## Docker 自部署（Linux）
+
+推荐的生产部署方式：后端镜像为纯 CPU（VL/LLM 通过可配置的远程 OpenAI 兼容端点调用，
+镜像不含模型权重、无需 GPU），前端为 nginx 托管的静态 SPA 并反向代理 `/api`。
+
+```bash
+cp .env.example .env    # 按需修改 VL_MODEL_* / VL_ANCHOR_*
+docker compose up -d --build
+# 浏览器打开 http://localhost:8080
+```
+
+- `backend`：FastAPI，仅回环暴露 `127.0.0.1:8765`；任务与日志写入命名卷 `vl-data:/data`。
+- `gui`：nginx 提供静态站（`:8080`），`/api` 反代到 backend，同源免 CORS。
+- 对外访问请用带 TLS 的反向代理置于 `gui` 前，并设置 `VL_ANCHOR_AUTH_TOKEN` 开启鉴权。
+
+### 模型后端配置
+
+平台区分两类模型角色（由 `model:` 共享默认 + `llm:`/`vl:` 分角色覆盖，
+或环境变量 `VL_MODEL_*` 共享 + `VL_LLM_*`/`VL_VL_*` 分角色）：
+
+| 角色 | 驱动的 Agent | 模型类型 | 用途 |
+| --- | --- | --- | --- |
+| `llm` | PlanAgent | 文本 LLM | 自然语言描述 → 结构化训练计划 |
+| `vl` | AnnotateAgent | 视觉语言模型 | 图像 → OBB 检测框 |
+
+InspectAgent 为纯规则质检，不调用任何模型。`provider` 取值：
+
+| provider | 行为 |
+| --- | --- |
+| `stub`（默认） | 离线确定性伪输出，无需模型/网络，用于演示与 CI |
+| `remote` | 调用对应 `base_url` 的 OpenAI 兼容 `/chat/completions` 端点 |
+
+未单独配置的会自动回退：`llm`/`vl` 缺字段时继承共享 `model:` 块，因此单端点部署
+无需逐角色配置；而典型生产部署可让 plan 走便宜文本模型、annotate 走自建
+Qwen2.5-VL。配置优先级：分角色 env (`VL_LLM_*`/`VL_VL_*`) > 分角色 yaml >
+共享 env (`VL_MODEL_*`) > 共享 yaml `model:` > 内置默认（见 `src/config.py`）。
+
+常用镜像标签：`ghcr.io/<owner>/vl-yolo-anchor-backend` 与 `…-gui`（`latest` / `v*` / sha）。
+
 ## 质量检查
 
 ```bash
@@ -118,9 +157,9 @@ uv run pytest                   # 测试（tests/）
 
 ## 当前状态 / 已知限制
 
-- **PlanAgent / AnnotateAgent 使用确定性 stub 推理**（`StubLLMClient` /
-  固定伪检测框），用于离线跑通全流程；接入真实 Qwen2.5-VL 时实现
-  `LLMClient` 协议 / 替换 `AnnotateAgent._infer` 即可，提示词与解析逻辑已就绪。
+- **默认 `provider: stub` 使用确定性推理**（`StubLLMClient` / 固定伪检测框），用于离线
+  跑通全流程与 CI；设 `provider: remote` 后 `PlanAgent`/`AnnotateAgent` 经
+  `OpenAICompatClient` 调用可配置的远程 VL/LLM 端点（自定义 base_url / api_key / model）。
 - `gui/` 与 `gui/src-tauri/` 依赖未随仓库提交，需先 `npm install`
   （`npm run tauri dev` 另需 Rust toolchain）。
 - SDD 流程文档见 `docs/sdd-workflow.md`；正式 spec 位于 `specs/`，

@@ -16,6 +16,15 @@ export interface ImageItem {
   height?: number;
 }
 
+/** Which directory a set of label boxes came from. */
+export type LabelSource = "candidate_labels" | "ai_labels";
+
+/** Per-image label payload including its source directory. */
+export interface LabelResult {
+  boxes: OBBBox[];
+  source: LabelSource;
+}
+
 /** High-level task info. */
 export interface TaskInfo {
   name: string;

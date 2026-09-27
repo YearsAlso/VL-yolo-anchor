@@ -38,15 +38,19 @@ class TaskManager:
         ensure_dir(tasks_root)
 
     def task_dir(self, name: str) -> Path:
-        """Return the directory for a task.
+        """Return the directory path for a task (no side effects).
+
+        This resolves ``<tasks_root>/<name>`` without creating it, so read
+        paths (e.g. a GET for an unknown task) never leave a stray folder
+        behind. Directory creation happens only in :meth:`create_task`.
 
         Args:
             name: Task name.
 
         Returns:
-            Path ``<tasks_root>/<name>`` (created if missing).
+            Path ``<tasks_root>/<name>``.
         """
-        return ensure_dir(self.tasks_root / name)
+        return self.tasks_root / name
 
     def create_task(self, name: str, description: str = "") -> Path:
         """Create a new task directory with scaffolded subdirectories.

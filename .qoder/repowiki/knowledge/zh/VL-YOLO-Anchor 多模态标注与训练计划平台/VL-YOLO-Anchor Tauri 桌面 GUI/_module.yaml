@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: gui_tauri_app
+title: VL-YOLO-Anchor Tauri 桌面 GUI
+scope:
+    - gui/
+source_files: []
+depends_on: []
+related_to:
+    - path: python_package

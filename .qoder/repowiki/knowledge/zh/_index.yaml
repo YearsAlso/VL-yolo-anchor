@@ -1,0 +1,79 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: zh-CN
+branch: feature/initial-platform-scaffold
+nodes_managed: true
+exported_at: "2026-09-26T15:22:14Z"
+modules:
+    "":
+        dir_name: VL-YOLO-Anchor 多模态标注与训练计划平台
+        title: VL-YOLO-Anchor 多模态标注与训练计划平台
+        scope:
+            - CLAUDE.md
+            - pyproject.toml
+            - uv.lock
+            - .gitignore
+            - run.py
+            - start_gui.ps1
+            - start_gui.sh
+            - README.md
+        source_files: []
+        children:
+            - config_prompts
+            - gui_tauri_app
+            - python_package
+            - specs_docs
+            - tests
+        depends_on: []
+        related_to: []
+    config_prompts:
+        dir_name: 全局配置与 Agent 提示词模板
+        title: 全局配置与 Agent 提示词模板
+        scope:
+            - config/
+            - prompts/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    gui_tauri_app:
+        dir_name: VL-YOLO-Anchor Tauri 桌面 GUI
+        title: VL-YOLO-Anchor Tauri 桌面 GUI
+        scope:
+            - gui/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: python_package
+    python_package:
+        dir_name: VL-YOLO-Anchor 标注与训练计划生成平台
+        title: VL-YOLO-Anchor 标注与训练计划生成平台
+        scope:
+            - src/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: gui_tauri_app
+            - path: tests
+    specs_docs:
+        dir_name: 规格与文档（Specs & Docs）
+        title: 规格与文档（Specs & Docs）
+        scope:
+            - specs/
+            - docs/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    tests:
+        dir_name: Pytest 测试套件
+        title: Pytest 测试套件
+        scope:
+            - tests/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: python_package

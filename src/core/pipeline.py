@@ -11,7 +11,9 @@ from typing import Any
 from src.agents.annotate_agent import AnnotateAgent
 from src.agents.base_agent import BaseAgent
 from src.agents.inspect_agent import InspectAgent
-from src.agents.plan_agent import PlanAgent
+from src.agents.model_client import build_model_client
+from src.agents.plan_agent import PlanAgent, StubLLMClient
+from src.config import ModelSettings
 from src.core.task_manager import TaskManager
 from src.utils.file_utils import ensure_dir, list_images
 from src.utils.yaml_utils import save_yaml
@@ -28,22 +30,61 @@ class Pipeline:
         logger: Pipeline logger.
     """
 
-    def __init__(self, task_manager: TaskManager, agents: dict[str, BaseAgent] | None = None) -> None:
+    def __init__(
+        self,
+        task_manager: TaskManager,
+        agents: dict[str, BaseAgent] | None = None,
+        prompts_dir: Path = Path("prompts"),
+        llm_settings: ModelSettings | None = None,
+        vl_settings: ModelSettings | None = None,
+    ) -> None:
         """Initialize the pipeline.
 
         Args:
             task_manager: Manager providing task directories and configs.
             agents: Optional explicit agent mapping with keys ``plan``,
-                ``annotate``, ``inspect``. Defaults to the built-in stub
-                agents (offline, no model downloads).
+                ``annotate``, ``inspect``. Defaults to agents wired from
+                ``prompts_dir`` and the two model settings.
+            prompts_dir: Directory holding the agent prompt YAML files.
+            llm_settings: Text-LLM config for the plan step; when its provider
+                is ``"remote"`` an OpenAI-compatible client is injected into
+                PlanAgent, else a deterministic stub is used.
+            vl_settings: Vision-language config for the annotate step; when its
+                provider is ``"remote"`` a client is injected into AnnotateAgent,
+                else the offline stub runs (no network/model downloads).
         """
         self.task_manager: TaskManager = task_manager
-        self.agents: dict[str, BaseAgent] = agents or {
-            "plan": PlanAgent({}, Path("prompts")),
-            "annotate": AnnotateAgent({}, Path("prompts")),
-            "inspect": InspectAgent({}, Path("prompts")),
-        }
+        self.agents: dict[str, BaseAgent] = agents or self._default_agents(
+            prompts_dir, llm_settings, vl_settings
+        )
         self.logger: logging.Logger = logging.getLogger(self.__class__.__name__)
+
+    @staticmethod
+    def _default_agents(
+        prompts_dir: Path,
+        llm_settings: ModelSettings | None,
+        vl_settings: ModelSettings | None,
+    ) -> dict[str, BaseAgent]:
+        """Build the default plan/annotate/inspect agents.
+
+        Plan uses the text ``llm_settings``; annotate uses the multimodal
+        ``vl_settings``; inspect is pure rule-based and takes no model.
+
+        Args:
+            prompts_dir: Directory holding the prompt YAML files.
+            llm_settings: Text-LLM configuration (``None`` => stub).
+            vl_settings: VL configuration (``None`` => stub).
+
+        Returns:
+            Mapping of step name to agent instance.
+        """
+        llm_client = build_model_client(llm_settings) if llm_settings is not None else None
+        vl_client = build_model_client(vl_settings) if vl_settings is not None else None
+        return {
+            "plan": PlanAgent({}, prompts_dir, llm_client=llm_client or StubLLMClient()),
+            "annotate": AnnotateAgent({}, prompts_dir, vl_client=vl_client),
+            "inspect": InspectAgent({}, prompts_dir),
+        }
 
     def run_full(self, task_name: str) -> dict[str, Any]:
         """Run all steps for a task: plan, annotate, inspect, split.

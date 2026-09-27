@@ -14,7 +14,8 @@
 - 文件：`tauri.conf.json`、`Cargo.toml`、`build.rs`、`src/main.rs`、`.gitignore`。
 - 图标：`icons/{32x32.png,128x128.png,128x128@2x.png,icon.ico,icon.png}`，并在 `tauri.bundle.icon` 中声明（Windows 上 `tauri-build` 依赖 `icons/icon.ico` 生成资源文件，缺失即编译失败）。
 - 窗口标题 `VL-YOLO-Anchor`，默认 1280×800。
-- `allowlist.http` 仅放行 `http://127.0.0.1:8765/*`。
+- `allowlist.http` 含 `"request": true`、`"all": false`，`scope` 仅放行 `http://127.0.0.1:8765/*`（无 `request: true` 时 scope 不启用任何 HTTP 能力）。
+- `security.csp` 设为最小 CSP（`connect-src`/`img-src` 放行 `127.0.0.1:8765`，`style-src` 允许 `'unsafe-inline'` 供 Ant Design），不为 `null`。
 
 ## 边界条件
 

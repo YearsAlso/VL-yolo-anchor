@@ -1,0 +1,32 @@
+# Version control / CI
+.git
+.github
+.gitignore
+
+# Python
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+src/vl_yolo_anchor.egg-info
+
+# Generated task/log artifacts (must come from the /data volume, not the image)
+tasks
+logs
+
+# GUI has its own image / build context
+gui/node_modules
+gui/dist
+gui/src-tauri
+node_modules
+
+# Local env / secrets
+.env
+*.local
+
+# Editor/OS noise
+.DS_Store
+.idea
+.vscode
